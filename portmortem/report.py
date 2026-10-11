@@ -1,120 +1,79 @@
 """
-HTML report generation. Pure presentation - takes the data collected by
-scanner.py / probe.py / risk_checks.py and renders it.
+Formal HTML report for Portmortem.
+
+Presentation only: takes the data collected by scanner.py / probe.py /
+risk_checks.py and renders a pentest-style deliverable (cover, contents,
+executive summary, scope and methodology, numbered findings, remediation
+roadmap, appendices). The file is self-contained: no external fonts, scripts
+or images, so it renders offline and prints cleanly to PDF.
 """
 
 from __future__ import annotations
 
 import html
+from collections import Counter
 from datetime import datetime, timezone
 
 from .probe import ServiceInfo
 from .risk_checks import Finding, SEVERITY_HIGH, SEVERITY_MEDIUM, SEVERITY_LOW, SEVERITY_INFO
 
-SEVERITY_ORDER = {SEVERITY_HIGH: 0, SEVERITY_MEDIUM: 1, SEVERITY_LOW: 2, SEVERITY_INFO: 3}
-SEVERITY_COLOR = {
-    SEVERITY_HIGH: "#f6465d",
-    SEVERITY_MEDIUM: "#f7a74a",
-    SEVERITY_LOW: "#4aa8f7",
-    SEVERITY_INFO: "#8b93a1",
+TOOL_NAME = "Portmortem"
+TOOL_VERSION = "1.0"
+
+SEVERITY_ORDER = [SEVERITY_HIGH, SEVERITY_MEDIUM, SEVERITY_LOW, SEVERITY_INFO]
+SEVERITY_LABEL = {SEVERITY_HIGH: "High", SEVERITY_MEDIUM: "Medium", SEVERITY_LOW: "Low", SEVERITY_INFO: "Informational"}
+SEVERITY_MEANING = {
+    SEVERITY_HIGH: "Unauthenticated access to a service or its data was demonstrated, or sensitive traffic is exposed. Fix immediately.",
+    SEVERITY_MEDIUM: "Weakness that helps an attacker or exposes data under some conditions. Fix in the next maintenance cycle.",
+    SEVERITY_LOW: "Limited impact on its own; a hardening or defence-in-depth improvement.",
+    SEVERITY_INFO: "No direct risk; recorded for completeness.",
 }
-SEVERITY_BG = {
-    SEVERITY_HIGH: "rgba(246,70,93,0.12)",
-    SEVERITY_MEDIUM: "rgba(247,167,74,0.12)",
-    SEVERITY_LOW: "rgba(74,168,247,0.12)",
-    SEVERITY_INFO: "rgba(139,147,161,0.12)",
+REMEDIATION_WINDOW = {
+    SEVERITY_HIGH: "Immediate (within 7 days)",
+    SEVERITY_MEDIUM: "Short term (within 30 days)",
+    SEVERITY_LOW: "Planned (within 90 days)",
+    SEVERITY_INFO: "Optional",
 }
 
 _CSS = """
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
-
-:root {
-  --bg: #0a0c10; --panel: #12151c; --panel-2: #171b24; --border: #242938;
-  --text: #e8eaed; --muted: #8b93a1; --muted-2: #5e6675;
-  --accent: #3ddc97;
-}
-* { box-sizing: border-box; }
-body {
-  margin: 0; background:
-    radial-gradient(1200px 500px at 15% -10%, rgba(61,220,151,0.07), transparent),
-    radial-gradient(900px 500px at 100% 0%, rgba(74,168,247,0.06), transparent),
-    var(--bg);
-  color: var(--text);
-  font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  line-height: 1.55; -webkit-font-smoothing: antialiased;
-}
-code, .mono { font-family: 'JetBrains Mono', ui-monospace, monospace; }
-
-header { padding: 48px 48px 36px; border-bottom: 1px solid var(--border); }
-.eyebrow {
-  color: var(--accent); font-size: 12px; font-weight: 700; letter-spacing: 0.12em;
-  text-transform: uppercase; margin-bottom: 10px; display: flex; align-items: center; gap: 8px;
-}
-.eyebrow::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 10px var(--accent); }
-header h1 { margin: 0 0 10px 0; font-size: 30px; font-weight: 800; letter-spacing: -0.02em; }
-header h1 .domain { color: var(--accent); }
-header .meta { color: var(--muted); font-size: 13.5px; }
-header .meta span { color: var(--text); font-weight: 500; }
-
-.container { max-width: 1120px; margin: 0 auto; padding: 40px 48px 90px; }
-
-.overview { display: grid; grid-template-columns: 1.1fr 2fr; gap: 20px; margin-bottom: 44px; }
-.risk-card {
-  background: var(--panel); border: 1px solid var(--border); border-radius: 16px;
-  padding: 28px; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center;
-}
-.risk-ring { position: relative; width: 132px; height: 132px; margin-bottom: 14px; }
-.risk-ring svg { transform: rotate(-90deg); }
-.risk-ring .ring-bg { fill: none; stroke: var(--panel-2); stroke-width: 10; }
-.risk-ring .ring-fg { fill: none; stroke-width: 10; stroke-linecap: round; }
-.risk-ring .ring-num { position: absolute; top: 0; right: 0; bottom: 0; left: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; }
-.risk-ring .ring-num .score { font-size: 30px; font-weight: 800; }
-.risk-ring .ring-num .max { font-size: 11px; color: var(--muted-2); }
-.risk-label { font-size: 14px; font-weight: 700; padding: 5px 14px; border-radius: 999px; margin-top: 6px; }
-
-.summary-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; }
-.summary-card { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 18px 20px; display: flex; flex-direction: column; justify-content: center; }
-.summary-card .num { font-size: 26px; font-weight: 800; line-height: 1; }
-.summary-card .label { color: var(--muted); font-size: 12.5px; margin-top: 6px; }
-.summary-card.hi .num { color: var(--sev-color, #f6465d); }
-
-.severity-bar-wrap { grid-column: 1 / -1; background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 18px 22px; }
-.severity-bar-wrap .sb-title { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; font-weight: 700; margin-bottom: 12px; }
-.severity-bar { display: flex; height: 10px; border-radius: 999px; overflow: hidden; background: var(--panel-2); }
-.severity-bar div { height: 100%; }
-.severity-legend { display: flex; gap: 20px; margin-top: 12px; flex-wrap: wrap; }
-.severity-legend .item { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--muted); }
-.severity-legend .dot { width: 9px; height: 9px; border-radius: 50%; }
-
-h2.section {
-  font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.1em;
-  color: var(--muted); margin: 48px 0 18px; padding-bottom: 12px; border-bottom: 1px solid var(--border);
-  display: flex; align-items: center; justify-content: space-between;
-}
-h2.section .count { color: var(--text); background: var(--panel-2); border-radius: 999px; padding: 2px 10px; font-size: 12px; }
-
-.finding {
-  background: var(--panel); border: 1px solid var(--border); border-left: 3px solid; border-radius: 14px;
-  padding: 18px 22px; margin-bottom: 12px;
-}
-.finding .top-row { display: flex; justify-content: space-between; align-items: flex-start; gap: 14px; flex-wrap: wrap; }
-.finding .title-block .title { font-weight: 600; font-size: 14.5px; }
-.finding .title-block .host { color: var(--accent); font-size: 12.5px; margin-top: 2px; }
-.badge { display: inline-block; padding: 4px 12px; border-radius: 999px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; flex-shrink: 0; }
-.evidence { background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; margin-top: 12px; font-size: 12.5px; color: #c3cad6; white-space: pre-wrap; word-break: break-word; }
-.recommendation { margin-top: 10px; font-size: 13px; color: var(--muted); }
-.recommendation strong { color: var(--text); }
-
-.table-wrap { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; overflow: hidden; }
-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-th, td { text-align: left; padding: 13px 18px; border-bottom: 1px solid var(--border); }
-th { color: var(--muted); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; background: var(--panel-2); }
-tbody tr:last-child td { border-bottom: none; }
-tbody tr:hover { background: var(--panel-2); }
-.port-pill { font-family: 'JetBrains Mono', monospace; font-weight: 700; color: var(--accent); }
-.empty-state { color: var(--muted); padding: 28px; text-align: center; font-size: 13.5px; background: var(--panel); border: 1px dashed var(--border); border-radius: 14px; }
-
-footer { color: var(--muted-2); font-size: 12px; text-align: center; padding: 36px; border-top: 1px solid var(--border); max-width: 1120px; margin: 0 auto; }
+:root{--ink:#1b2430;--muted:#5b6675;--rule:#cfd6df;--navy:#14304f;--paper:#fff;--tint:#f3f5f8;
+--high:#8b1a1a;--medium:#b4531a;--low:#2f6b8a;--info:#5b6675}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:#e9edf2;color:var(--ink);font:15px/1.6 "Segoe UI",Calibri,Arial,sans-serif}
+.page{max-width:900px;margin:28px auto;background:var(--paper);padding:56px 64px;border:1px solid var(--rule)}
+h1,h2,h3{font-family:Cambria,Georgia,"Times New Roman",serif;color:var(--navy);line-height:1.25}
+h2{font-size:22px;margin:42px 0 12px;padding-bottom:6px;border-bottom:2px solid var(--navy)}
+h3{font-size:17px;margin:24px 0 8px}
+p{margin:0 0 12px}
+a{color:var(--navy)}
+table{width:100%;border-collapse:collapse;margin:12px 0 18px;font-size:14px}
+th,td{border:1px solid var(--rule);padding:7px 10px;text-align:left;vertical-align:top}
+th{background:var(--tint);font-weight:600}
+td.k{background:var(--tint);width:28%;font-weight:600}
+.scroll{overflow-x:auto}
+.cover{min-height:780px;display:flex;flex-direction:column;justify-content:space-between}
+.cover h1{font-size:40px;margin:90px 0 8px}
+.cover .sub{font-size:19px;color:var(--muted);margin:0 0 40px}
+.cover .bar{height:5px;width:96px;background:var(--navy);margin-bottom:28px}
+.sev{display:inline-block;font-weight:700;font-size:13px;padding:1px 9px;border:1.5px solid currentColor;border-radius:3px;white-space:nowrap}
+.s-High{color:var(--high)}.s-Medium{color:var(--medium)}.s-Low{color:var(--low)}.s-Info{color:var(--info)}
+.finding{border:1px solid var(--rule);border-left:5px solid var(--info);padding:6px 20px 14px;margin:22px 0;break-inside:avoid}
+.b-High{border-left-color:var(--high)}.b-Medium{border-left-color:var(--medium)}.b-Low{border-left-color:var(--low)}.b-Info{border-left-color:var(--info)}
+.finding h3{margin-top:14px;color:var(--ink)}
+pre{background:#10161f;color:#e5ebf3;padding:12px 14px;border-radius:3px;overflow-x:auto;
+font:13px/1.5 Consolas,"Courier New",monospace;white-space:pre-wrap;word-break:break-word;margin:6px 0 12px}
+.callout{background:var(--tint);border-left:4px solid var(--navy);padding:12px 16px;margin:14px 0}
+.small{font-size:13px;color:var(--muted)}
+.bars td{border:0;padding:3px 10px 3px 0;font-size:14px}
+.bars .track{background:var(--tint);height:14px;width:100%;border-radius:2px}
+.bars .fill{height:14px;border-radius:2px}
+.f-High{background:var(--high)}.f-Medium{background:var(--medium)}.f-Low{background:var(--low)}.f-Info{background:var(--info)}
+ol.toc{padding-left:20px;margin:0}ol.toc li{margin-bottom:3px}
+ol.steps li{margin-bottom:6px}
+@media(max-width:700px){.page{padding:28px 20px;margin:0}.cover h1{font-size:30px;margin-top:40px}}
+@media print{body{background:#fff}.page{border:0;margin:0;max-width:none;padding:0}
+.cover{page-break-after:always}h2{page-break-after:avoid}.finding,tr{page-break-inside:avoid}a{color:inherit;text-decoration:none}}
 """
 
 
@@ -122,83 +81,46 @@ def _esc(s) -> str:
     return html.escape(str(s), quote=True)
 
 
-def _risk_score(severity_counts: dict[str, int]) -> int:
-    raw = severity_counts.get(SEVERITY_HIGH, 0) * 25 + severity_counts.get(SEVERITY_MEDIUM, 0) * 10 + severity_counts.get(SEVERITY_LOW, 0) * 3
-    return min(100, raw)
+def _badge(sev: str) -> str:
+    return f'<span class="sev s-{_esc(sev)}">{_esc(SEVERITY_LABEL.get(sev, sev))}</span>'
 
 
-def _risk_label(score: int) -> tuple[str, str]:
-    if score == 0:
-        return "Clean", "#3ddc97"
-    if score < 20:
-        return "Low Risk", "#4aa8f7"
-    if score < 50:
-        return "Moderate Risk", "#f7a74a"
-    return "High Risk", "#f6465d"
+def _fmt(dt: datetime | None) -> str:
+    return dt.strftime("%d %B %Y, %H:%M UTC") if dt else "n/a"
 
 
-def _render_risk_ring(score: int, color: str) -> str:
-    radius = 56
-    circumference = 2 * 3.14159265 * radius
-    offset = circumference * (1 - score / 100)
-    return f"""
-    <div class="risk-ring">
-      <svg width="132" height="132" viewBox="0 0 132 132">
-        <circle class="ring-bg" cx="66" cy="66" r="{radius}"/>
-        <circle class="ring-fg" cx="66" cy="66" r="{radius}" stroke="{color}"
-          stroke-dasharray="{circumference:.1f}" stroke-dashoffset="{offset:.1f}"/>
-      </svg>
-      <div class="ring-num"><div class="score">{score}</div><div class="max">/ 100</div></div>
-    </div>
-    """
+def _cwe(f: Finding) -> str:
+    t = f.title.lower()
+    if any(k in t for k in ("redis", "elasticsearch", "docker")):
+        return "CWE-306: Missing Authentication for Critical Function"
+    if "anonymous" in t:
+        return "CWE-284: Improper Access Control"
+    if "telnet" in t or "ftp service" in t:
+        return "CWE-319: Cleartext Transmission of Sensitive Information"
+    if "outdated tls" in t:
+        return "CWE-326: Inadequate Encryption Strength"
+    if "expired" in t:
+        return "CWE-298: Improper Validation of Certificate Expiration"
+    return "Not mapped"
 
 
-def _render_findings(findings: list[Finding]) -> str:
-    if not findings:
-        return '<div class="empty-state">No findings in this category — none of the checks produced verified evidence of a problem.</div>'
-    parts = []
-    for f in sorted(findings, key=lambda x: SEVERITY_ORDER.get(x.severity, 9)):
-        color = SEVERITY_COLOR.get(f.severity, "#8b93a1")
-        bg = SEVERITY_BG.get(f.severity, "rgba(139,147,161,0.12)")
-        parts.append(f"""
-        <div class="finding" style="border-left-color:{color}">
-          <div class="top-row">
-            <div class="title-block">
-              <div class="title">{_esc(f.title)}</div>
-              <div class="host mono">{_esc(f.host)}:{f.port}</div>
-            </div>
-            <span class="badge" style="background:{bg}; color:{color}">{_esc(f.severity)}</span>
-          </div>
-          <div class="evidence mono">{_esc(f.evidence)}</div>
-          <div class="recommendation"><strong>Fix:</strong> {_esc(f.recommendation)}</div>
-        </div>
-        """)
-    return "".join(parts)
+def _identified_by(s: ServiceInfo) -> str:
+    if s.tls and s.http_headers:
+        return "TLS handshake + HTTP response"
+    if s.http_headers:
+        return "HTTP response"
+    if s.product and s.banner:
+        return "Service banner"
+    if s.banner:
+        return "Service banner (unrecognised)"
+    if s.tls:
+        return "TLS handshake"
+    return "Port number only (unverified)"
 
 
-def _render_port_table(services: list[ServiceInfo]) -> str:
-    if not services:
-        return '<div class="empty-state">No open ports found.</div>'
-    rows = []
-    for s in sorted(services, key=lambda x: x.port):
-        product = s.product or "—"
-        version = f" {s.version}" if s.version else ""
-        rows.append(f"""
-        <tr>
-          <td class="port-pill">{s.port}</td>
-          <td>{_esc(s.protocol_guess)}</td>
-          <td>{_esc(product)}{_esc(version)}</td>
-          <td class="mono" style="color:var(--muted); font-size:12px; max-width:320px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">{_esc(s.banner[:100]) if s.banner else ''}</td>
-        </tr>
-        """)
-    return f"""
-    <div class="table-wrap">
-    <table>
-      <thead><tr><th>Port</th><th>Protocol</th><th>Service / Version</th><th>Banner</th></tr></thead>
-      <tbody>{''.join(rows)}</tbody>
-    </table>
-    </div>
-    """
+def _numbered(findings: list[Finding]) -> list[tuple[str, Finding]]:
+    ordered = sorted(findings, key=lambda f: (SEVERITY_ORDER.index(f.severity) if f.severity in SEVERITY_ORDER else 9, f.port, f.title))
+    return [(f"PM-{i:03d}", f) for i, f in enumerate(ordered, 1)]
 
 
 def build_html_report(
@@ -207,86 +129,176 @@ def build_html_report(
     ports_scanned: int,
     services: list[ServiceInfo],
     findings: list[Finding],
+    *,
+    client: str = "",
+    assessor: str = "",
+    started: datetime | None = None,
+    finished: datetime | None = None,
+    port_spec: str = "",
+    threads: int | None = None,
+    timeout: float | None = None,
 ) -> str:
-    severity_counts = {s: 0 for s in (SEVERITY_HIGH, SEVERITY_MEDIUM, SEVERITY_LOW, SEVERITY_INFO)}
-    for f in findings:
-        severity_counts[f.severity] = severity_counts.get(f.severity, 0) + 1
+    now = datetime.now(timezone.utc)
+    started = started or now
+    finished = finished or now
+    duration = max(1, int((finished - started).total_seconds()))
+    counts = Counter(f.severity for f in findings)
+    overall = next((s for s in SEVERITY_ORDER if counts.get(s)), None)
+    numbered = _numbered(findings)
+    verified = sum(1 for s in services if _identified_by(s) != "Port number only (unverified)")
+    tls_services = [s for s in services if s.tls]
+    target = f"{host} ({resolved_ip})" if resolved_ip and resolved_ip != host else host
 
-    generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    score = _risk_score(severity_counts)
-    risk_text, risk_color = _risk_label(score)
+    o: list[str] = []
+    o.append("<!DOCTYPE html><html lang='en'><head><meta charset='utf-8'>")
+    o.append("<meta name='viewport' content='width=device-width,initial-scale=1'>")
+    o.append(f"<title>Network Service Assessment Report - {_esc(host)}</title><style>{_CSS}</style></head><body>")
 
-    total_findings = sum(severity_counts.values()) or 1
-    bar_segments = "".join(
-        f'<div style="width:{severity_counts[s]/total_findings*100:.1f}%; background:{SEVERITY_COLOR[s]}"></div>'
-        for s in (SEVERITY_HIGH, SEVERITY_MEDIUM, SEVERITY_LOW, SEVERITY_INFO) if severity_counts[s] > 0
-    ) or '<div style="width:100%; background:var(--panel-2)"></div>'
+    # ---- Cover ----
+    o.append("<div class='page'><section class='cover'><div>")
+    o.append("<h1>Network Service<br>Assessment Report</h1><div class='bar'></div>")
+    o.append("<p class='sub'>TCP port and service exposure review</p>")
+    o.append("<table>")
+    o.append(f"<tr><td class='k'>Prepared for</td><td>{_esc(client or 'Not specified')}</td></tr>")
+    o.append(f"<tr><td class='k'>Prepared by</td><td>{_esc(assessor or 'Not specified')}</td></tr>")
+    o.append(f"<tr><td class='k'>Target</td><td>{_esc(target)}</td></tr>")
+    o.append(f"<tr><td class='k'>Assessment date</td><td>{_esc(_fmt(started))}</td></tr>")
+    rating = _badge(overall) if overall else "No findings confirmed"
+    o.append(f"<tr><td class='k'>Highest severity</td><td>{rating}</td></tr></table></div>")
+    o.append("<p class='small'>Confidential. This document contains security-sensitive information and is "
+             "intended only for the named recipient.</p></section>")
 
-    legend = "".join(
-        f'<div class="item"><span class="dot" style="background:{SEVERITY_COLOR[s]}"></span>{s}: {severity_counts[s]}</div>'
-        for s in (SEVERITY_HIGH, SEVERITY_MEDIUM, SEVERITY_LOW)
-    )
+    # ---- Document control + contents ----
+    o.append("<h2>Document control</h2><table>")
+    o.append("<tr><td class='k'>Report version</td><td>1.0</td></tr>")
+    o.append(f"<tr><td class='k'>Tool</td><td>{TOOL_NAME} {TOOL_VERSION}</td></tr>")
+    o.append(f"<tr><td class='k'>Scan started</td><td>{_esc(_fmt(started))}</td></tr>")
+    o.append(f"<tr><td class='k'>Scan finished</td><td>{_esc(_fmt(finished))} (about {duration} s)</td></tr>")
+    o.append("<tr><td class='k'>Classification</td><td>Confidential</td></tr></table>")
+    o.append("<h3>Contents</h3><ol class='toc'>")
+    for anchor, label in [("summary", "Executive summary"), ("method", "Scope and methodology"),
+                          ("overview", "Summary of findings"), ("details", "Detailed findings"),
+                          ("roadmap", "Remediation roadmap"), ("app-a", "Appendix A. Open port inventory"),
+                          ("app-b", "Appendix B. TLS inventory"), ("app-c", "Appendix C. Limitations")]:
+        o.append(f"<li><a href='#{anchor}'>{label}</a></li>")
+    o.append("</ol>")
 
-    summary_cards = [
-        ("Ports Scanned", ports_scanned, None),
-        ("Open Ports", len(services), None),
-        ("High Severity", severity_counts[SEVERITY_HIGH], SEVERITY_COLOR[SEVERITY_HIGH]),
-        ("Medium Severity", severity_counts[SEVERITY_MEDIUM], SEVERITY_COLOR[SEVERITY_MEDIUM]),
-    ]
-    summary_html = "".join(
-        f'<div class="summary-card{" hi" if color else ""}" style="--sev-color:{color or ""}"><div class="num">{v}</div><div class="label">{_esc(k)}</div></div>'
-        for k, v, color in summary_cards
-    )
+    # ---- 1 Executive summary ----
+    o.append("<h2 id='summary'>1. Executive summary</h2>")
+    o.append(f"<p>An automated TCP network service assessment was performed against <strong>{_esc(target)}</strong>. "
+             f"{ports_scanned} TCP port(s) were probed. {len(services)} open port(s) were found, and "
+             f"{verified} of them were identified from the service's own response rather than from the port number.</p>")
+    if findings:
+        o.append(f"<p>{len(findings)} finding(s) were confirmed by direct, read-only interaction with the services. "
+                 f"The highest severity observed is {_badge(overall)}. Every finding includes the evidence captured, "
+                 "so it can be reproduced and verified independently.</p>")
+    else:
+        o.append("<p>No exposure was confirmed by the checks in this assessment. This does not prove the target is "
+                 "secure; Appendix C describes the limits of the method.</p>")
+    peak = max([counts.get(s, 0) for s in SEVERITY_ORDER] + [1])
+    o.append("<table class='bars'>")
+    for s in SEVERITY_ORDER:
+        n = counts.get(s, 0)
+        o.append(f"<tr><td style='width:130px'>{_badge(s)}</td><td style='width:40px'>{n}</td>"
+                 f"<td><div class='track'><div class='fill f-{s}' style='width:{n / peak * 100:.0f}%'></div></div></td></tr>")
+    o.append("</table>")
+    top = [(fid, f) for fid, f in numbered if f.severity == SEVERITY_HIGH]
+    if top:
+        items = "; ".join(f"<a href='#{fid}'>{fid}</a> {_esc(f.title)} (port {f.port})" for fid, f in top)
+        o.append(f"<div class='callout'><strong>Priority actions.</strong> Address these first: {items}.</div>")
 
-    return f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>NetScope Report — {_esc(host)}</title>
-<style>{_CSS}</style>
-</head>
-<body>
-<header>
-  <div class="eyebrow">NetScope &middot; Port & Service Scan</div>
-  <h1>Network Exposure Report for <span class="domain">{_esc(host)}</span></h1>
-  <div class="meta">Generated <span>{generated_at}</span> &nbsp;&middot;&nbsp; Resolved to <span>{_esc(resolved_ip or 'n/a')}</span></div>
-</header>
-<div class="container">
+    # ---- 2 Scope and methodology ----
+    o.append("<h2 id='method'>2. Scope and methodology</h2><h3>2.1 Scope</h3><table>")
+    o.append(f"<tr><td class='k'>Target</td><td>{_esc(host)}</td></tr>")
+    o.append(f"<tr><td class='k'>Resolved address</td><td>{_esc(resolved_ip or 'n/a')}</td></tr>")
+    o.append(f"<tr><td class='k'>Ports probed</td><td>{ports_scanned}" + (f" ({_esc(port_spec)})" if port_spec else "") + "</td></tr>")
+    o.append("<tr><td class='k'>Protocol</td><td>TCP, IPv4</td></tr>")
+    if threads and timeout:
+        o.append(f"<tr><td class='k'>Concurrency / timeout</td><td>{threads} threads / {timeout:.1f} s</td></tr>")
+    o.append("</table><h3>2.2 Method</h3><ol class='steps'>")
+    o.append("<li><strong>Port discovery.</strong> A TCP connect scan identified ports that accept connections.</li>")
+    o.append("<li><strong>Service identification.</strong> Open ports were fingerprinted from their banner, an HTTP "
+             "response or a TLS handshake. Ports where no response was obtained are marked as unverified in Appendix A.</li>")
+    o.append("<li><strong>Verification.</strong> For services with a known unsafe configuration, a read-only check "
+             "was sent (for example an anonymous FTP login or an unauthenticated command). A finding is recorded "
+             "only when the server's reply proves it.</li>")
+    o.append("<li><strong>Reporting.</strong> Findings are ranked by severity and carry the captured evidence.</li></ol>")
+    o.append("<h3>2.3 Severity ratings</h3><table><tr><th>Rating</th><th>Meaning</th></tr>")
+    for s in SEVERITY_ORDER:
+        o.append(f"<tr><td>{_badge(s)}</td><td>{_esc(SEVERITY_MEANING[s])}</td></tr>")
+    o.append("</table>")
 
-  <div class="overview">
-    <div class="risk-card">
-      {_render_risk_ring(score, risk_color)}
-      <div class="risk-label" style="background:{risk_color}22; color:{risk_color}">{risk_text}</div>
-    </div>
-    <div class="summary-grid">
-      {summary_html}
-      <div class="severity-bar-wrap">
-        <div class="sb-title">Findings by Severity</div>
-        <div class="severity-bar">{bar_segments}</div>
-        <div class="severity-legend">{legend}</div>
-      </div>
-    </div>
-  </div>
+    # ---- 3 Summary of findings ----
+    o.append("<h2 id='overview'>3. Summary of findings</h2>")
+    if numbered:
+        o.append("<div class='scroll'><table><tr><th>ID</th><th>Severity</th><th>Finding</th><th>Affected</th></tr>")
+        for fid, f in numbered:
+            o.append(f"<tr><td><a href='#{fid}'>{fid}</a></td><td>{_badge(f.severity)}</td><td>{_esc(f.title)}</td>"
+                     f"<td>{_esc(f.host)}:{f.port}</td></tr>")
+        o.append("</table></div>")
+    else:
+        o.append("<p>No findings.</p>")
 
-  <h2 class="section">High Severity <span class="count">{severity_counts[SEVERITY_HIGH]}</span></h2>
-  {_render_findings([f for f in findings if f.severity == SEVERITY_HIGH])}
+    # ---- 4 Detailed findings ----
+    o.append("<h2 id='details'>4. Detailed findings</h2>")
+    if not numbered:
+        o.append("<p>No findings to detail.</p>")
+    for fid, f in numbered:
+        o.append(f"<div class='finding b-{_esc(f.severity)}' id='{fid}'><h3>{fid} &ndash; {_esc(f.title)}</h3><table>")
+        o.append(f"<tr><td class='k'>Severity</td><td>{_badge(f.severity)}</td></tr>")
+        o.append(f"<tr><td class='k'>Affected</td><td>{_esc(f.host)}:{f.port}</td></tr>")
+        o.append(f"<tr><td class='k'>Category</td><td>{_esc(f.category)}</td></tr>")
+        o.append(f"<tr><td class='k'>Weakness</td><td>{_esc(_cwe(f))}</td></tr></table>")
+        o.append(f"<p><strong>Evidence</strong></p><pre>{_esc(f.evidence)}</pre>")
+        o.append(f"<p><strong>Recommendation</strong></p><p>{_esc(f.recommendation)}</p></div>")
 
-  <h2 class="section">Medium Severity <span class="count">{severity_counts[SEVERITY_MEDIUM]}</span></h2>
-  {_render_findings([f for f in findings if f.severity == SEVERITY_MEDIUM])}
+    # ---- 5 Remediation roadmap ----
+    o.append("<h2 id='roadmap'>5. Remediation roadmap</h2>")
+    if numbered:
+        o.append("<p>Suggested remediation windows by severity. Adjust to the client's own risk policy.</p>")
+        o.append("<table><tr><th>Window</th><th>Findings</th></tr>")
+        for s in SEVERITY_ORDER:
+            ids = [fid for fid, f in numbered if f.severity == s]
+            if ids:
+                o.append(f"<tr><td>{_esc(REMEDIATION_WINDOW[s])}</td><td>" +
+                         ", ".join(f"<a href='#{i}'>{i}</a>" for i in ids) + "</td></tr>")
+        o.append("</table>")
+    else:
+        o.append("<p>No remediation actions arise from this assessment.</p>")
 
-  <h2 class="section">Low / Informational <span class="count">{severity_counts[SEVERITY_LOW] + severity_counts[SEVERITY_INFO]}</span></h2>
-  {_render_findings([f for f in findings if f.severity in (SEVERITY_LOW, SEVERITY_INFO)])}
+    # ---- Appendix A ----
+    o.append("<h2 id='app-a'>Appendix A. Open port inventory</h2>")
+    if services:
+        o.append("<div class='scroll'><table><tr><th>Port</th><th>Service</th><th>Product / version</th>"
+                 "<th>Identified by</th><th>Banner</th></tr>")
+        for s in sorted(services, key=lambda x: x.port):
+            prod = " ".join(p for p in (s.product, s.version) if p) or "-"
+            o.append(f"<tr><td>{s.port}/tcp</td><td>{_esc(s.protocol_guess)}</td><td>{_esc(prod)}</td>"
+                     f"<td>{_esc(_identified_by(s))}</td><td>{_esc(s.banner[:80]) if s.banner else '-'}</td></tr>")
+        o.append("</table></div>")
+    else:
+        o.append("<p>No open ports were found in the scanned range.</p>")
 
-  <h2 class="section">Open Ports <span class="count">{len(services)}</span></h2>
-  {_render_port_table(services)}
+    # ---- Appendix B ----
+    o.append("<h2 id='app-b'>Appendix B. TLS inventory</h2>")
+    if tls_services:
+        o.append("<div class='scroll'><table><tr><th>Port</th><th>Protocol</th><th>Cipher</th>"
+                 "<th>Certificate subject</th><th>Expires</th></tr>")
+        for s in sorted(tls_services, key=lambda x: x.port):
+            t = s.tls or {}
+            cn = (t.get("subject") or {}).get("commonName") or "-"
+            o.append(f"<tr><td>{s.port}/tcp</td><td>{_esc(t.get('protocol_version') or '-')}</td>"
+                     f"<td>{_esc(t.get('cipher') or '-')}</td><td>{_esc(cn)}</td><td>{_esc(t.get('not_after') or '-')}</td></tr>")
+        o.append("</table></div>")
+    else:
+        o.append("<p>No TLS services were negotiated.</p>")
 
-</div>
-<footer>
-  Generated by NetScope — an authorized-use network reconnaissance tool. Every finding above is backed by a
-  recorded protocol response shown in its evidence line. Only run this against hosts you own or have
-  explicit written permission to test.
-</footer>
-</body>
-</html>
-"""
+    # ---- Appendix C ----
+    o.append("<h2 id='app-c'>Appendix C. Limitations</h2><ul>")
+    o.append("<li>This is a point-in-time view of the ports listed in the scope. Other ports, UDP services and IPv6 were not assessed.</li>")
+    o.append("<li>Firewalls and intrusion prevention systems can hide or alter results; a closed or filtered port is not proof that nothing is listening.</li>")
+    o.append("<li>Findings are raised from observed behaviour, not from version numbers, so known-vulnerable software versions are not reported unless the behaviour was confirmed.</li>")
+    o.append("<li>Checks are read-only. Write access, password strength and application-level flaws were not tested.</li>")
+    o.append("<li>The assessment was carried out only against systems the assessor is authorised to test.</li></ul>")
+    o.append("</div></body></html>")
+    return "".join(o)
