@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+build/
+dist/
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Generated reports (don't commit scan results — they can contain real target data)
+output/*.html
+!output/.gitkeep
+
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/
+.idea/
+*.swp

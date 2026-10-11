@@ -1,0 +1,14 @@
+[project]
+name = "portmortem"
+version = "1.0.0"
+description = "Threaded TCP port scanner with service fingerprinting and evidence-based risk detection"
+requires-python = ">=3.9"
+dependencies = [
+    "colorama>=0.4.6",
+]
+
+[project.scripts]
+portmortem = "portmortem.main:main"
+
+[tool.setuptools]
+packages = ["portmortem"]
